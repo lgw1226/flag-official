@@ -1,6 +1,16 @@
-# FLAG
+# FLAG: Flow Policy MaxEnt-RL by Latent Augmented Guidance
 
-This repository contains a JAX/Flax implementation of a FLAG agent that uses a FlagActor with distributional critics. It is configured via Hydra.
+FLAG is a Maximum Entropy Reinforcement Learning framework that trains expressive flow-based policies via supervised latent-augmented guidance — without backpropagation through time (BPTT) or importance weight collapse. Standard EM-based policy optimization relies on global importance sampling (IS) over the full action space, which suffers from weight degeneracy in high dimensions. FLAG avoids this by augmenting the MDP with a flow latent variable, inducing a local IS between distributions that share the same support, yielding dense and informative supervision at every update step. As shown below, FLAG captures all target modes even at N = 2, and consistently achieves higher IQM returns with less compute across MuJoCo, DMC Dog, and MyoSuite benchmarks — outperforming both global IS baselines and BPTT-based actor-critic methods without additional computational overhead.
+
+<p align="center">
+  <img src="figures/multigoal.png" width="80%" alt="Multigoal comparison"/><br>
+  <em>Policy distributions learned by each method in the multi-goal environment under varying sample budgets N. While global IS baselines fail at N ≤ 8, FLAG recovers all target modes even at N = 2.</em>
+</p>
+
+<p align="center">
+  <img src="figures/main.png" width="80%" alt="Performance vs GPU hours"/><br>
+  <em>IQM return vs. wall-clock GPU hours across three benchmarks with increasing action dimensionality. Methods in the upper-left are preferable (less time, higher IQM). FLAG (N=8, P=1) consistently occupies this region without additional computational overhead.</em>
+</p>
 
 ## Environment setup
 
