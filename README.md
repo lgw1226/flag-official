@@ -36,7 +36,7 @@ pip install -r requirements_myo.txt
 
 - **JAX + CUDA 12** (`jax`, `jax-cuda12-plugin`) — array library and JIT compiler. All forward/backward passes are compiled with `jax.jit` (via `@nnx.jit`). Random state is explicit: every sampling call takes a PRNG key derived from a `flax.nnx.Rngs` stream.
 - **Flax NNX** (`flax.nnx`) — neural network library. Models are plain Python classes that subclass `nnx.Module`. Parameters are stored as `nnx.Param` attributes and updated in-place through `nnx.Optimizer`. This is the newer NNX API (Flax ≥ 0.8), not the older Linen (`flax.linen`) API.
-19
+
 ## Run a single experiment
 
 **DMC/Gym-v5**
