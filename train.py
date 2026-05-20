@@ -1,5 +1,6 @@
 import sys
 import os
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 import warnings
@@ -7,14 +8,14 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="flax")
 
 from time import time
-from typing import Callable, Union
+from typing import Any, Callable, Union
 from collections import deque
 from functools import partial
 import random
 import numpy as np
-import os
 
-os.environ["MUJOCO_GL"] = "egl"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
 import jax
 import jax.numpy as jnp
 from jax import Array
@@ -36,8 +37,6 @@ from flag.utils.wrappers.normalize_env import (
     NormalizeJAXEnvWrapper,
     NormalizeJAXVectorEnvWrapper,
 )
-import flag.utils.wrappers.mujoco as mujoco_wrappers
-import flag.utils.wrappers.dmcontrol as dmcontrol_wrappers
 from flag.buffers import ReplayBuffer, GuidanceBuffer, GuidanceBatch
 from flag.utils.std_scheduler import LogstdScheduler
 
@@ -46,20 +45,8 @@ from pydantic._internal._generate_schema import UnsupportedFieldAttributeWarning
 warnings.filterwarnings("ignore", category=UnsupportedFieldAttributeWarning)
 
 
-EnvWrapper = Union[
-    mujoco_wrappers.JAXEnvWrapper,
-    dmcontrol_wrappers.DMControlJAXEnvWrapper,
-    NormalizeJAXEnvWrapper,
-]
-VectorEnvWrapper = Union[
-    mujoco_wrappers.JAXVectorEnvWrapper,
-    dmcontrol_wrappers.DMControlJAXVectorEnvWrapper,
-    NormalizeJAXVectorEnvWrapper,
-]
-
-
 def evaluate(
-    env: EnvWrapper,
+    env: Any,
     policy: Callable[[Array], Array],
     num_episodes: int,
     key: Array,
@@ -85,7 +72,7 @@ def evaluate(
 
 
 def evaluate_vectorized_env(
-    vec_env: VectorEnvWrapper,
+    vec_env: Any,
     policy: Callable[[Array], Array],
     key: Array,
 ) -> dict[str, float]:
@@ -190,6 +177,8 @@ def main(cfg: DictConfig):
     np.random.seed(cfg.seed)
 
     if cfg.env_id.startswith("dm_control/"):
+        import flag.utils.wrappers.dmcontrol as dmcontrol_wrappers
+
         env, eval_env = dmcontrol_wrappers.make_env(cfg)
         cfg.critic.max_val = 200.0
         cfg.critic.min_val = -200.0
@@ -200,6 +189,8 @@ def main(cfg: DictConfig):
         cfg.critic.max_val = 3600.0
         cfg.critic.min_val = -3600.0
     else:
+        import flag.utils.wrappers.mujoco as mujoco_wrappers
+
         env, eval_env = mujoco_wrappers.make_env(cfg)
         cfg.critic.max_val = 1600.0
         cfg.critic.min_val = -1600.0

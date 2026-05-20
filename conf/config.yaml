@@ -57,5 +57,5 @@ guidance_buffer:
 # WandB (for logging)
 wandb:
   project: FLAG
-  name: ${env_id}_${seed}
-  mode: online
+  name: ${env_id}
+  mode: offline

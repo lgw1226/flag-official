@@ -54,13 +54,13 @@ class BaseCritic(nnx.Module):
         network_config.in_features = input_dim
         network_config.out_features = output_dim
 
-        self.networks = nnx.List()
+        self.networks = []
         for _ in range(num_networks):
             network = MLP(config=network_config, rngs=rngs)
             self.networks.append(network)
 
         if has_target:
-            self.target_networks = nnx.List()
+            self.target_networks = []
             for network in self.networks:
                 target_network = deepcopy(network)
                 nnx.update(target_network, nnx.state(network))

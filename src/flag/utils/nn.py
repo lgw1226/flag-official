@@ -35,7 +35,7 @@ class MLP(nnx.Module):
 
         hidden = tuple(config.hidden_features)
         arch = (config.in_features,) + hidden + (config.out_features,)
-        self.layers = nnx.List()
+        self.layers = []
 
         for i in range(len(arch) - 2):
             if config.use_batch_renorm:

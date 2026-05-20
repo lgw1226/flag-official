@@ -1,5 +1,6 @@
 from typing import Literal
 
+import jax
 import jax.numpy as jnp
 from jax import Array
 from jax.lax import stop_gradient as sg
@@ -137,7 +138,7 @@ class FlagActor(BaseActor):
         S = self.num_train_action_samples
         A = self.action_dim
 
-        noise = self.rngs.normal((B, A))
+        noise = jax.random.normal(self.rngs.noise(), shape=(B, A))
         flow_sol = solve(
             noise,
             observation,
@@ -149,10 +150,10 @@ class FlagActor(BaseActor):
         logstd = self._get_logstd(observation, mu)
         std = jnp.exp(logstd)
         if is_single:
-            eps = self.rngs.normal(shape=(B, A))
+            eps = jax.random.normal(self.rngs.eps(), shape=(B, A))
             logp_slice_preimage = standard_normal_log_prob(eps) - jnp.sum(logstd, axis=-1, keepdims=True)
             pretanh_action = sg(mu) + sg(std) * eps
-            tangent = self.rngs.rademacher((B, A)).astype(jnp.float32)
+            tangent = jax.random.rademacher(self.rngs.tangent(), shape=(B, A)).astype(jnp.float32)
             _, logp_flow_preimage = solve_with_logprob_backward(
                 sg(pretanh_action),
                 tangent,
@@ -162,14 +163,14 @@ class FlagActor(BaseActor):
                 self.dt,
             )
         else:
-            eps = self.rngs.normal(shape=(B, S, A))
+            eps = jax.random.normal(self.rngs.eps(), shape=(B, S, A))
             eps = jnp.concatenate([eps, jnp.zeros_like(eps)], dtype=jnp.float32, axis=1)
 
             logp_slice_preimage = (
                 standard_normal_log_prob(eps) - jnp.sum(logstd, axis=-1, keepdims=True)[:, jnp.newaxis]
             )
             pretanh_action = sg(mu)[:, jnp.newaxis] + sg(std[:, jnp.newaxis]) * eps
-            tangent = self.rngs.rademacher((B, S, A)).astype(jnp.float32)
+            tangent = jax.random.rademacher(self.rngs.tangent(), shape=(B, S, A)).astype(jnp.float32)
             tangent = jnp.concatenate([tangent, tangent], axis=1)
             _, logp_flow_preimage = solve_with_logprob_backward(
                 sg(pretanh_action).reshape(B * 2 * S, A),
@@ -200,7 +201,7 @@ class FlagActor(BaseActor):
                 repeats=self.num_eval_action_samples,
                 axis=0,
             )
-            noise = self.rngs.normal(shape=(batch_size * self.num_eval_action_samples, self.output_dim))
+            noise = jax.random.normal(self.rngs.noise(), shape=(batch_size * self.num_eval_action_samples, self.output_dim))
             flow_sol = solve(
                 noise,
                 repeated_obs,
@@ -212,7 +213,7 @@ class FlagActor(BaseActor):
             mu = mu.reshape(batch_size, self.num_eval_action_samples, -1)
             return jnp.tanh(mu)
         else:
-            noise = self.rngs.normal(shape=(batch_size, self.output_dim))
+            noise = jax.random.normal(self.rngs.noise(), shape=(batch_size, self.output_dim))
             flow_sol = solve(
                 noise,
                 observation,
@@ -223,5 +224,5 @@ class FlagActor(BaseActor):
             mu = flow_sol
             logstd = self._get_logstd(observation, mu)
             std = jnp.exp(logstd)
-            u = mu + std * self.rngs.normal(mu.shape)
+            u = mu + std * jax.random.normal(self.rngs.eps(), shape=mu.shape)
             return sg(jnp.tanh(u))

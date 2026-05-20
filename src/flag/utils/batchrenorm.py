@@ -109,10 +109,7 @@ class BatchRenorm(nnx.Module):
                 mask=mask,
             )
 
-            if self.running_mean.has_ref or self.running_var.has_ref:
-                stop_gradient = jax.lax.stop_gradient
-            else:
-                stop_gradient = lambda x: x
+            stop_gradient = jax.lax.stop_gradient
 
 
             custom_mean = mean
