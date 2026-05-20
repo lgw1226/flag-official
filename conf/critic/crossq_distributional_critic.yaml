@@ -1,0 +1,13 @@
+_target_: flag.critics.DistributionalCritic
+num_networks: 2
+has_target: false
+use_crossq_trick: true
+max_val: 200
+min_val: -200
+n_atoms: 101
+network_config:
+  _target_: flag.utils.nn.MLPConfig
+  hidden_features: [2048, 2048]
+  use_batch_renorm: true
+  batch_renorm_momentum: 0.99
+  batch_renorm_warmup_steps: 100000

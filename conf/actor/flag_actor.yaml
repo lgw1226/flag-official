@@ -1,0 +1,16 @@
+_target_: flag.actors.FlagActor
+time_embed_dim: 32
+num_solver_steps: 8
+solver_name: midpoint
+num_train_action_samples: 8
+num_eval_action_samples: 32
+min_logstd: -20.0
+max_logstd: 0.0
+init_logstd: -2.0
+logstd_mode: fixed
+
+mean_network_config:
+  _target_: flag.utils.nn.MLPConfig
+  hidden_features: [256, 256, 256]
+logstd_network_config:
+  _target_: flag.utils.nn.MLPConfig

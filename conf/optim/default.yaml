@@ -1,0 +1,15 @@
+actor_optim:
+  tx:
+    _target_: optax.adamw
+    learning_rate: 0.0003
+
+critic_optim:
+  tx:
+    _target_: optax.adamw
+    learning_rate: 0.0003
+    b1: 0.5
+
+alpha_optim:
+  tx:
+    _target_: optax.adamw
+    learning_rate: 0.001
