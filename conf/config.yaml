@@ -54,6 +54,11 @@ guidance_buffer:
   size: 10240
   batch_size: 256
 
+# checkpointing
+ckpt_dir: checkpoints/${env_id}_seed${seed}
+ckpt_interval: 10000  # env steps; 0 to disable. every checkpoint is kept (~110MB + replay buffer each)
+resume: null  # "latest", or a path to a step_*.pkl
+
 # WandB (for logging)
 wandb:
   project: FLAG

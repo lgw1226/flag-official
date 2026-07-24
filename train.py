@@ -15,12 +15,17 @@ import random
 import numpy as np
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+# flax >= 0.12 makes Modules pytrees, which rejects plain lists of submodules (MLP.layers, BaseCritic.networks)
+os.environ.setdefault("FLAX_PYTREE_MODULE", "false")
 
 import jax
 import jax.numpy as jnp
 from jax import Array
 from jax.lax import stop_gradient as sg
 import flax.nnx as nnx
+
+# flax >= 0.11 moved the model out of nnx.Optimizer; ModelAndOptimizer keeps the old model-holding behaviour
+NNXOptimizer = getattr(nnx, "ModelAndOptimizer", nnx.Optimizer)
 
 import wandb
 import hydra
@@ -39,6 +44,7 @@ from flag.utils.wrappers.normalize_env import (
 )
 from flag.buffers import ReplayBuffer, GuidanceBuffer, GuidanceBatch
 from flag.utils.std_scheduler import LogstdScheduler
+from flag.utils.checkpoint import save_checkpoint, load_checkpoint, find_latest
 
 from pydantic._internal._generate_schema import UnsupportedFieldAttributeWarning
 
@@ -232,7 +238,7 @@ def main(cfg: DictConfig):
         cfg.actor, observation_dim=env.obs_dim, action_dim=env.act_dim, rngs=actor_seed, _convert_="all"
     )
     actor_optim_tx = instantiate(cfg.actor_optim.tx)
-    actor_optim = nnx.Optimizer(
+    actor_optim = NNXOptimizer(
         actor,
         actor_optim_tx,
         wrt=nnx.Param,
@@ -243,7 +249,7 @@ def main(cfg: DictConfig):
     )
     critic.train()
     critic_optim_tx = instantiate(cfg.critic_optim.tx)
-    critic_optim = nnx.Optimizer(
+    critic_optim = NNXOptimizer(
         critic,
         critic_optim_tx,
         wrt=nnx.Param,
@@ -252,7 +258,7 @@ def main(cfg: DictConfig):
     alpha = instantiate(cfg.alpha)
     if isinstance(alpha, Alpha):
         alpha_optim_tx = instantiate(cfg.alpha_optim.tx)
-        alpha_optim = nnx.Optimizer(
+        alpha_optim = NNXOptimizer(
             alpha,
             alpha_optim_tx,
             wrt=nnx.Param,
@@ -313,16 +319,48 @@ def main(cfg: DictConfig):
 
     return_sum = 0.0
     length_sum = 0.0
+    total_updates = 0
+
+    ckpt_dir = os.path.abspath(cfg.ckpt_dir)
+    ckpt_modules = {
+        "actor": actor,
+        "critic": critic,
+        "alpha": alpha,
+        "actor_optim": actor_optim,
+        "critic_optim": critic_optim,
+        "alpha_optim": alpha_optim,
+    }
+    ckpt_buffers = {"buffer": buffer, "guidance_buffer": guidance_buffer}
+
+    start_step = 0
+    wandb_id = None
+    resume_path = find_latest(ckpt_dir) if cfg.resume == "latest" else cfg.resume
+    if resume_path:
+        last_step, extra = load_checkpoint(resume_path, ckpt_modules, ckpt_buffers)
+        start_step = last_step + 1
+        key = jax.random.wrap_key_data(extra["key_data"])
+        episode_cnt = extra["episode_cnt"]
+        total_updates = extra["total_updates"]
+        episode_return_window = extra["episode_return_window"]
+        episode_length_window = extra["episode_length_window"]
+        return_sum = float(sum(episode_return_window))
+        length_sum = float(sum(episode_length_window))
+        wandb_id = extra["wandb_id"]
+        if cfg.normalize_env:
+            normalizer.__dict__.update(extra["normalizer"].__dict__)  # wrappers hold a reference: restore in place
+        print(f"[ckpt] resumed {resume_path} @ step {last_step} (logstd={extra['logstd']})")
+
     wandb.init(
         **cfg.wandb,
+        id=wandb_id,
+        resume="allow",
         config=OmegaConf.to_container(cfg, resolve=True),
     )
 
     key, reset_key = jax.random.split(key)
     obs, info = env.reset(reset_key)
-    pbar = tqdm(range(cfg.total_steps), desc="Training", ncols=100)
+    pbar = tqdm(range(start_step, cfg.total_steps), desc="Training", ncols=100)
 
-    total_updates = 0
     actor_updates_since_log = 0
     for step in pbar:
         if step <= cfg.start_steps:
@@ -487,6 +525,26 @@ def main(cfg: DictConfig):
                 tqdm.write("")
             if log:
                 wandb.log(log, step=step)
+
+        if cfg.ckpt_interval and step > start_step and step % cfg.ckpt_interval == 0:
+            logstd = float(actor.fixed_logstd.value.mean()) if actor.logstd_mode == "fixed" else None
+            path = save_checkpoint(
+                ckpt_dir,
+                step,
+                ckpt_modules,
+                ckpt_buffers,
+                extra={
+                    "key_data": np.asarray(jax.random.key_data(key)),
+                    "logstd": logstd,
+                    "episode_cnt": episode_cnt,
+                    "total_updates": total_updates,
+                    "episode_return_window": episode_return_window,
+                    "episode_length_window": episode_length_window,
+                    "normalizer": normalizer if cfg.normalize_env else None,
+                    "wandb_id": wandb.run.id,
+                },
+            )
+            tqdm.write(f"💾 checkpoint @ step {step} (logstd={logstd}) → {path}")
 
 
 if __name__ == "__main__":

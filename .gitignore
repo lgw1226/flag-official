@@ -14,6 +14,9 @@ multirun/
 # Weights & Biases
 wandb/
 
+# Checkpoints
+checkpoints/
+
 # Jupyter
 .ipynb_checkpoints/
 

@@ -25,7 +25,7 @@ def guidance_supervision_loss_fn(
     x1 = sg(batch.act)
 
     x0 = sg(batch.noise)
-    t = jax.random.uniform(actor.rngs.t(), shape=(B, 1))
+    t = jax.random.uniform(actor.rngs['t'](), shape=(B, 1))
 
     xt = (1.0 - t) * x0 + t * x1
     vt = actor(t.ravel(), xt, batch.obs)
@@ -76,7 +76,7 @@ def flag_actor_loss_fn(
 
     target_means = u_star
 
-    t = jax.random.uniform(actor.rngs.t(), shape=(B, 1))
+    t = jax.random.uniform(actor.rngs['t'](), shape=(B, 1))
     xt = (1 - t) * flow_noise + t * target_means
     vt = actor(t.ravel(), xt, batch.obs)
     flow_loss = jnp.mean(((vt - (target_means - flow_noise)) ** 2))
