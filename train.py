@@ -45,6 +45,7 @@ from flag.utils.wrappers.normalize_env import (
 from flag.buffers import ReplayBuffer, GuidanceBuffer, GuidanceBatch
 from flag.utils.std_scheduler import LogstdScheduler
 from flag.utils.checkpoint import save_checkpoint, load_checkpoint, find_latest
+from flag.utils.diagnostics import Phase0Diagnostics
 
 from pydantic._internal._generate_schema import UnsupportedFieldAttributeWarning
 
@@ -274,6 +275,7 @@ def main(cfg: DictConfig):
         eta=cfg.eta,
         gradient_steps=cfg.utd,
         ent_coeff=cfg.ent_coeff,
+        diag_metrics=bool(cfg.diag.enabled),
     )
 
     critic_metrics = nnx.MultiMetric(
@@ -309,6 +311,8 @@ def main(cfg: DictConfig):
     buffer: ReplayBuffer = instantiate(cfg.buffer, obs_dim=env.obs_dim, act_dim=env.act_dim)
     guidance_buffer: GuidanceBuffer = instantiate(cfg.guidance_buffer, obs_dim=env.obs_dim, act_dim=env.act_dim)
 
+    diag = Phase0Diagnostics(cfg.diag, seed=cfg.seed, act_dim=env.act_dim, eta=cfg.eta) if cfg.diag.enabled else None
+
     episode_reward = 0.0
     episode_return = 0.0
     episode_length = 0
@@ -337,6 +341,10 @@ def main(cfg: DictConfig):
     resume_path = find_latest(ckpt_dir) if cfg.resume == "latest" else cfg.resume
     if resume_path:
         last_step, extra = load_checkpoint(resume_path, ckpt_modules, ckpt_buffers)
+        # phase1_plan §3: a checkpoint must only resume a run with the same N
+        ckpt_n = extra.get("num_train_action_samples")
+        if ckpt_n is not None and int(ckpt_n) != int(actor.num_train_action_samples):
+            raise ValueError(f"checkpoint N={ckpt_n} != configured N={actor.num_train_action_samples}")
         start_step = last_step + 1
         key = jax.random.wrap_key_data(extra["key_data"])
         episode_cnt = extra["episode_cnt"]
@@ -446,6 +454,12 @@ def main(cfg: DictConfig):
                     idx=jnp.zeros((bs_flow,), dtype=jnp.int32),
                 )
             update_actor_mask = tuple(((total_updates + i + 1) % max(1, cfg.policy_delay) == 0) for i in range(cfg.utd))
+            # phase-0 diagnostics (plan.md II-V). One "update" = one gaussian_flow_step call
+            # (utd gradient steps; with supervision the actor moves on every one), so light
+            # pre/post brackets a call-level aggregate — the per-update proxy of plan 1.2.
+            do_light = diag is not None and step % cfg.diag.light_every == 0
+            if do_light:
+                pre = diag.light_pre(actor, alpha, guidance_batch if enable_supervision else None, buffer)
             metrics, refined_obs, refined_actions, refined_noise = step_fn(
                 batch=batch,
                 guidance_batch=guidance_batch,
@@ -459,6 +473,29 @@ def main(cfg: DictConfig):
                 enable_supervision=enable_supervision,
                 supervision_coef=jnp.asarray(supervision_coef, dtype=jnp.float32),
             )
+
+            if do_light:
+                light = diag.light_post(
+                    actor, alpha, guidance_batch if enable_supervision else None, guidance_buffer, step, pre
+                )
+                # per-mini-step fresh-target/IS metrics from inside gaussian_flow_step
+                # (phase1_plan §2.2/2.4); absent when this call had no actor update
+                light.update(
+                    {k: float(v) for k, v in metrics.items() if k.startswith("diag/") and np.isfinite(float(v))}
+                )
+                wandb.log(light, step=step)
+            if diag is not None:
+                if cfg.diag.probe_interval and step % cfg.diag.probe_interval == 0:
+                    wandb.log(diag.heavy_probe(step, actor, critic, alpha, buffer), step=step)
+                if (
+                    cfg.diag.shadow_interval
+                    and cfg.seed in list(cfg.diag.shadow_seeds)
+                    and step % cfg.diag.shadow_interval == 0
+                ):
+                    wandb.log(diag.kl_shadow(step, actor, critic, alpha, actor_optim, buffer), step=step)
+                # stored-target metrics are the only ones that require guidance targets
+                if enable_supervision and cfg.diag.staleness_interval and step % cfg.diag.staleness_interval == 0:
+                    wandb.log(diag.staleness(step, actor, critic, alpha, guidance_buffer), step=step)
 
             critic_metrics.update(
                 critic_loss=metrics["critic_loss"],
@@ -482,7 +519,7 @@ def main(cfg: DictConfig):
                     variance=metrics["variance"],
                     advantage=metrics["advantage"],
                 )
-                guidance_buffer.add(refined_obs, refined_actions, refined_noise)
+                guidance_buffer.add(refined_obs, refined_actions, refined_noise, step=step)
             total_updates += cfg.utd
 
         if step % cfg.log_interval == 0:
@@ -536,6 +573,7 @@ def main(cfg: DictConfig):
                 extra={
                     "key_data": np.asarray(jax.random.key_data(key)),
                     "logstd": logstd,
+                    "num_train_action_samples": int(actor.num_train_action_samples),
                     "episode_cnt": episode_cnt,
                     "total_updates": total_updates,
                     "episode_return_window": episode_return_window,

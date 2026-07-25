@@ -44,7 +44,12 @@ class BaseActor(nnx.Module):
     def get_action(self, observation: Array, evaluate: bool) -> Array:
         raise NotImplementedError
 
-    def get_action_logprob(self, observation: Array) -> tuple[Array, ...]:
+    def get_action_logprob(
+        self,
+        observation: Array,
+        is_single: bool = False,
+        return_tangent: bool = False,
+    ) -> tuple[Array, ...]:
         raise NotImplementedError
 
 
@@ -133,7 +138,8 @@ class FlagActor(BaseActor):
         self,
         observation: Array,
         is_single: bool = False,
-    ) -> tuple[Array, Array, Array, Array, Array, Array]:
+        return_tangent: bool = False,
+    ) -> tuple[Array, ...]:
         B = observation.shape[0]
         S = self.num_train_action_samples
         A = self.action_dim
@@ -191,6 +197,8 @@ class FlagActor(BaseActor):
         )
         logp_slice = logp_slice_preimage - correction
         logp_flow = logp_flow_preimage - correction
+        if return_tangent:
+            return action, logp_slice, logp_flow, pretanh_action, logstd, noise, tangent
         return action, logp_slice, logp_flow, pretanh_action, logstd, noise
 
     def get_action(self, observation: Array, evaluate: bool) -> Array:

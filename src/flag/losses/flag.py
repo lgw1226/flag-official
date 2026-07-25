@@ -12,6 +12,7 @@ from flag.critics import ScalarCritic, DistributionalCritic
 from flag.buffers import ReplayBatch, GuidanceBatch
 from flag.utils.weight import get_weights
 from flag.utils.math import two_hot
+from flag.utils.flow import solve, solve_with_logprob_backward
 
 
 def guidance_supervision_loss_fn(
@@ -38,21 +39,25 @@ def flag_actor_loss_fn(
     alpha: Alpha,
     eta: float,
     batch: ReplayBatch,
-) -> tuple[Array, tuple[Array, Array, Array, Array, Array, Array]]:
+    diag: bool = False,
+):
     B = batch.obs.shape[0]
     S = actor.num_train_action_samples
     O = batch.obs.shape[1]
     A = batch.act.shape[1]
     critic.eval()
 
-    outs = actor.get_action_logprob(batch.obs)
+    outs = actor.get_action_logprob(batch.obs, return_tangent=diag)
 
     def selective_sg(x, apply_sg):
         return sg(x) if apply_sg else x
 
-    sg_mask = (True, True, True, True, False, True)
+    sg_mask = (True, True, True, True, False, True) + ((True,) if diag else ())
     outs = jax.tree.map(selective_sg, outs, sg_mask)
-    act, logp_gaussian, logp_flow, pretanh_a, logstd, flow_noise = outs
+    if diag:
+        act, logp_gaussian, logp_flow, pretanh_a, logstd, flow_noise, flow_tangent = outs
+    else:
+        act, logp_gaussian, logp_flow, pretanh_a, logstd, flow_noise = outs
 
     obs_repeated = batch.obs[:, jnp.newaxis].repeat(S + 1, axis=1)
     obs_flat = obs_repeated.reshape(-1, O)
@@ -71,6 +76,7 @@ def flag_actor_loss_fn(
         eta,
     )
 
+    mu_anchor = pretanh_a[:, -1]  # flow endpoint T_theta(s,z): anchor entry (eps=0), pre-clip
     pretanh_a = jnp.clip(pretanh_a, -3.8, 3.8)
     u_star = sg(weights * pretanh_a[:, : S + 1]).sum(axis=1)
 
@@ -85,7 +91,53 @@ def flag_actor_loss_fn(
     actor_loss = flow_loss
 
     variance = sg(jnp.mean(jnp.var(act[:, :-1], axis=1)))
-    return actor_loss, (logp_gaussian[:, :-1], logp_flow[:, :-1], variance, adv_log, u_star, flow_noise)
+
+    diag_metrics = None
+    if diag:
+        # phase1_plan.md sec.2.2/2.4 — all sg'd, no gradient contribution, no extra RNG.
+        # Per-candidate scaled advantage a_i = A_i/alpha. Each candidate is paired
+        # with the duplicated anchor evaluated using the same Hutchinson tangent,
+        # exactly as in get_weights' f_dist - f_mean.
+        a_i = sg(
+            (q_sg[:, :-1] - q_sg[:, -1:]) / alpha()
+            - (logp_flow[:, :S] - logp_flow[:, S:])
+        )[..., 0]
+        std = sg(jnp.exp(logstd))
+        # target augmented value: one extra critic eval on the target action only.
+        q_tgt = sg(jnp.mean(critic(batch.obs, jnp.tanh(u_star), use_target=False), axis=0))
+        d_u = (u_star - sg(mu_anchor)) / std  # logstd/std are (B, A)
+
+        # Evaluate target and anchor under the same flow-policy density estimator.
+        # Reuse candidate 0's existing Rademacher tangent, so diagnostics consume no
+        # additional actor RNG. The matching anchor logp is already at index S.
+        target_tangent = flow_tangent[:, 0]
+        _, target_logp_pre = solve_with_logprob_backward(
+            u_star,
+            target_tangent,
+            batch.obs,
+            actor.__call__,
+            actor.solver_name,
+            actor.dt,
+        )
+        target_action = jnp.clip(jnp.tanh(u_star), -0.999, 0.999)
+        target_correction = jnp.sum(
+            jnp.log(1.0 - target_action**2 + 1e-6),
+            axis=-1,
+            keepdims=True,
+        )
+        target_logp_flow = sg(target_logp_pre - target_correction)
+        anchor_logp_flow = sg(logp_flow[:, S])
+        dF = (q_tgt - q_sg[:, -1]) - alpha() * (target_logp_flow - anchor_logp_flow)
+        diag_metrics = {
+            "diag/R_fresh_before": jnp.mean(jnp.sum((sg(mu_anchor) - u_star) ** 2, axis=-1)),
+            "diag/P_hit": jnp.mean(jnp.max(a_i, axis=1) > 0),
+            "diag/p_better": jnp.mean(a_i > 0),
+            "diag/dF_target": jnp.mean(dF),
+            "diag/dQ_target": jnp.mean(q_tgt - q_sg[:, -1]),
+            "diag/D_local": jnp.mean(jnp.linalg.norm(d_u, axis=-1)) / jnp.sqrt(A),
+        }
+
+    return actor_loss, (logp_gaussian[:, :-1], logp_flow[:, :-1], variance, adv_log, u_star, flow_noise, diag_metrics)
 
 
 def scalar_critic_loss_fn(
@@ -206,6 +258,7 @@ def distributional_critic_loss_fn(
         "update_actor_mask",
         "enable_supervision",
         "ent_coeff",
+        "diag_metrics",
     ]
 )
 def gaussian_flow_step(
@@ -226,6 +279,7 @@ def gaussian_flow_step(
     enable_supervision: bool,
     supervision_coef: Array,
     ent_coeff: float = 0.0,
+    diag_metrics: bool = False,
 ) -> tuple[dict[str, Array], Array | None, Array | None, Array | None]:
 
     def reshape_batch(x):
@@ -290,7 +344,7 @@ def gaussian_flow_step(
                 else:
                     supervision_loss_raw = jnp.array(0.0, dtype=jnp.float32)
                     supervision_loss = jnp.array(0.0, dtype=jnp.float32)
-                actor_loss, aux = flag_actor_loss_fn(actor, critic, alpha, eta, b)
+                actor_loss, aux = flag_actor_loss_fn(actor, critic, alpha, eta, b, diag=diag_metrics)
                 total_loss = actor_loss + supervision_loss
                 return total_loss, (actor_loss, supervision_loss_raw, aux)
 
@@ -298,8 +352,20 @@ def gaussian_flow_step(
             (total_loss, (actor_loss, supervision_loss_raw, aux)), actor_grads = actor_value_grad_fn(
                 actor, critic, alpha, eta, b, fb
             )
-            logp_gaussian, logp_flow, variance, advantage, refined_actions, refined_noise = aux
+            logp_gaussian, logp_flow, variance, advantage, refined_actions, refined_noise, diag_aux = aux
             actor_optim.update(actor_grads)
+            if diag_metrics:
+                # phase1_plan.md sec.2.2: fresh-target residual immediately after this
+                # optimizer mini-step, before the next one. Same (s, z, u_star) as the loss.
+                e_after = solve(refined_noise, b.obs, actor.__call__, actor.solver_name, actor.dt)
+                logstd_after = actor._get_logstd(b.obs, e_after)
+                r_fresh_after = jnp.mean(jnp.sum((e_after - refined_actions) ** 2, axis=-1))
+                diag_aux = dict(diag_aux)
+                diag_aux["diag/R_fresh_after"] = r_fresh_after
+                diag_aux["diag/realization_fresh"] = 1.0 - r_fresh_after / (diag_aux["diag/R_fresh_before"] + 1e-12)
+                diag_aux["diag/R_fresh_KL_after"] = jnp.mean(
+                    jnp.sum((e_after - refined_actions) ** 2 / (2.0 * jnp.exp(2.0 * logstd_after)), axis=-1)
+                )
             refined_actions_list.append(refined_actions)
             refined_obs_list.append(b.obs)
             refined_noise_list.append(refined_noise)
@@ -321,6 +387,7 @@ def gaussian_flow_step(
                     "mean_marginal_entropy": -jnp.mean(logp_flow),
                     "variance": variance,
                     "advantage": advantage,
+                    **(diag_aux or {}),
                 }
             )
         else:

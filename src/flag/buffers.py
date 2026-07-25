@@ -94,6 +94,9 @@ class GuidanceBuffer:
         self.obs_buffer = np.empty((size, obs_dim), dtype=np.float32)
         self.action_buffer = np.empty((size, act_dim), dtype=np.float32)
         self.noise_buffer = np.empty((size, act_dim), dtype=np.float32)
+        # diagnostics metadata: creation env step (-1 = unknown provenance) and reuse count
+        self.created_buffer = np.full((size,), -1, dtype=np.int64)
+        self.reuse_buffer = np.zeros((size,), dtype=np.int64)
         self.size = size
         self.batch_size = batch_size
         self.ptr = 0
@@ -102,7 +105,9 @@ class GuidanceBuffer:
     def __len__(self) -> int:
         return self.size if self.is_full else self.ptr
 
-    def add(self, obs: np.ndarray, action: np.ndarray, noise: np.ndarray) -> None:
+    def add(self, obs: np.ndarray, action: np.ndarray, noise: np.ndarray, step: int = -1) -> None:
+        if self.size == 0:
+            return
 
         obs_arr = np.asarray(obs, dtype=np.float32)
         act_arr = np.asarray(action, dtype=np.float32)
@@ -124,6 +129,8 @@ class GuidanceBuffer:
         self.obs_buffer[self.ptr : self.ptr + first] = obs_arr[:first]
         self.action_buffer[self.ptr : self.ptr + first] = act_arr[:first]
         self.noise_buffer[self.ptr : self.ptr + first] = noise_arr[:first]
+        self.created_buffer[self.ptr : self.ptr + first] = step
+        self.reuse_buffer[self.ptr : self.ptr + first] = 0
 
         self.ptr += first
         if self.ptr >= self.size:
@@ -135,6 +142,8 @@ class GuidanceBuffer:
             self.obs_buffer[self.ptr : self.ptr + remaining] = obs_arr[first:]
             self.action_buffer[self.ptr : self.ptr + remaining] = act_arr[first:]
             self.noise_buffer[self.ptr : self.ptr + remaining] = noise_arr[first:]
+            self.created_buffer[self.ptr : self.ptr + remaining] = step
+            self.reuse_buffer[self.ptr : self.ptr + remaining] = 0
             self.ptr += remaining
             self.is_full = True
 
@@ -143,6 +152,7 @@ class GuidanceBuffer:
         max_index = self.size if self.is_full else self.ptr
 
         indices = np.random.randint(0, max_index, size=bs)
+        self.reuse_buffer[indices] += 1
 
         batch = GuidanceBatch(
             obs=jnp.array(self.obs_buffer[indices]),

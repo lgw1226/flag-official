@@ -1073,3 +1073,129 @@ This plan is already the compute-limited version (one task, 5 seeds). If it must
 4. drop the E-step target drift diagnostic.
 
 Per-update residual and reward-drift logging (Sections 5–6) are cheap and are never cut.
+
+---
+
+# Part XIII. Logged Output Reference (wandb keys)
+
+What the implementation (`src/flag/utils/diagnostics.py`) actually logs, the quantity
+each key estimates, and what to check. All endpoint/target quantities live in pretanh
+($u$) space; $T_{\theta}(s,z)$ is the flow anchor `solve(z, s)` and $\hat\mu^\star$ the
+stored SNIS target. One "update" $k$ = one `gaussian_flow_step` call (Section 1.2 proxy).
+
+## 13.1 Per-update keys (every `diag.light_every` env steps)
+
+**`diag/R_before`, `diag/R_after`** — Eq. (§5.1–5.2) on the guidance batch of update $k$:
+
+$$
+R_k^{\mathrm{before/after}}
+=\frac1B\sum_i \|T_{\theta_{k/k+1}}(s_i,z_i)-\hat\mu_i^\star\|_2^2 .
+$$
+
+Check: `R_after < R_before` on most updates (success criterion 1).
+
+**`diag/realization`** — §5.3, $1-R^{\mathrm{after}}/(R^{\mathrm{before}}+\varepsilon)$.
+Check: predominantly $>0$; persistently $\approx 0$ means the CFM step realizes little of
+the target displacement; negative means it moves away.
+
+**`diag/R_KL`** — §5.4 in exact per-dimension Mahalanobis form,
+
+$$
+R_k^{\mathrm{KL}}
+=\frac1B\sum_i\sum_d
+\frac{(T_{\theta_{k+1}}(s_i,z_i)-\hat\mu_i^\star)_d^2}{2\sigma_{k,d}^2},
+\qquad \sigma_{k,d}=e^{(\mathrm{logstd}_k)_d}.
+$$
+
+This is the excess state-wise KL projection proxy. Watch the trend as $\sigma_k$ anneals:
+it stays bounded only if $R^{\mathrm{after}}$ shrinks at least as fast as $\sigma_k^2$.
+
+**`diag/drift_mean|median|p95|max`** — §6.1 with $\alpha_k$ frozen and CRN tangents,
+
+$$
+D_k^{r,\mathrm{policy}}
+=\frac{\alpha_k}{B}\sum_i\big|\log\tilde\pi_{\theta_{k+1}}(a_i|s_i)-\log\tilde\pi_{\theta_k}(a_i|s_i)\big| ,
+$$
+
+(`max` is the empirical max, not $\ell_\infty$). **`diag/drift_full`** — §6.2 with
+$\alpha_{k+1}$ applied. Check: small relative to the reward scale, and approximately
+proportional to `diag/dtheta` (scatter these two; criterion 6).
+
+**`diag/dtheta`, `diag/dtheta_rel`** — §6.4,
+$\|\theta_{k+1}-\theta_k\|_2$ and $\|\theta_{k+1}-\theta_k\|_2/\|\theta_k\|_2$.
+The scale reference for "drift is small."
+
+**`diag/buffer_age_mean|median|p95`**, **`diag/buffer_frac_age_le_1k`**,
+**`diag/buffer_reuse_mean`** — §7 metadata of the sampled guidance batch (ages in env
+steps; entries with unknown provenance excluded). Check: age distribution should scale
+with buffer size across Phase 1 conditions; reuse count confirms repeated supervision.
+
+## 13.2 Periodic probe keys (every `diag.probe_interval`)
+
+**`diag/E_current_fixed|moving`**, **`diag/E_current_KL_fixed|moving`** — §8 main metric,
+
+$$
+E_k^{\mathrm{current}}
+=\frac{1}{B_{\mathrm{probe}}}\sum_i
+\|T_{\theta_k}(s_i,z_i)-\mu_k^{\star,\mathrm{ref}}(s_i,z_i)\|_2^2 ,
+$$
+
+with $\mu^{\star,\mathrm{ref}}$ recomputed at $N_{\mathrm{ref}}$ samples under the current
+critic/policy/$\alpha_k$; `fixed` = probe set frozen at first evaluation (§9.1),
+`moving` = resampled from the replay buffer (§9.2). This is the curve for Figure 1 and
+the Phase 1 buffer-size comparison ($E^{\mathrm{current}}_{10.24\mathrm{k}} <
+E^{\mathrm{current}}_{0}$ expected).
+
+**`diag/E_SNIS`** — §11 noise floor, $\tfrac12\mathbb E\|\mu_A^{\star,\mathrm{ref}}-\mu_B^{\star,\mathrm{ref}}\|_2^2$
+from two independent estimates. Decision rule (Phase 0): `E_current` is informative only
+if it sits clearly above `E_SNIS`; if `E_current ≈ E_SNIS`, raise `diag.n_ref`.
+
+**`diag/ess_fixed|moving`** — §11, $\mathrm{ESS}=1/\sum_i\bar w_i^2 \in [1, N_{\mathrm{ref}}{+}1]$
+of the reference-target weights. Decision rule: if ESS $\ll N_{\mathrm{ref}}$ the
+reference target itself is high-variance → raise `n_ref` before trusting `E_current`.
+
+## 13.3 Staleness keys (every `diag.staleness_interval`)
+
+Per age bin $i$ (env-step bins $[0,1\mathrm{k}), [1\mathrm{k},4\mathrm{k}), [4\mathrm{k},16\mathrm{k}), [16\mathrm{k},64\mathrm{k}), [64\mathrm{k},\infty)$):
+
+**`diag/stale_E_fit_bin{i}`** = $E_{\mathrm{fit}}(\tau)$ (§10.1),
+**`diag/stale_E_stale_bin{i}`** = $E_{\mathrm{stale}}(\tau)$ (§10.2),
+**`diag/stale_E_current_bin{i}`** = $E_{\mathrm{current}}(\tau)$ (§10.3),
+**`diag/stale_count_bin{i}`** = true bin population (per-bin sampling is fixed-size with
+replacement, so tiny bins need the count to interpret).
+
+Check (Figure 3): $E_{\mathrm{fit}}$ flat/low across ages (repeated supervision works);
+$E_{\mathrm{stale}}$ increasing with age; sanity
+$E_{\mathrm{current}} \le 2E_{\mathrm{fit}}+2E_{\mathrm{stale}}$. Across Phase 1
+conditions, larger buffers should populate older bins with growing $E_{\mathrm{stale}}$.
+
+## 13.4 KL-shadow keys (every `diag.shadow_interval`; Phase 0 / default condition only)
+
+Both branches clone the live actor **and its Adam state** and take one step on a common
+frozen batch with a common $\mu^{\star,\mathrm{ref}}$ — the only difference between the
+branches is the loss (implementation deviation from §13.1's plain-SGD $\beta$ step,
+chosen so the CFM branch is the actual practical update of §13.2):
+
+**`diag/shadow_R_KL`, `diag/shadow_R_CFM`** — §13.3 post-step Mahalanobis residuals
+$R_k^{\mathrm{KL}}, R_k^{\mathrm{CFM}}$;
+**`diag/shadow_delta_proj`** — §13.4 $\Delta_k^{\mathrm{proj}}=R_k^{\mathrm{CFM}}-R_k^{\mathrm{KL}}$
+(signed; `_pos` is the clipped visualization);
+**`diag/shadow_D_endpoint`** — §13.5
+$\mathbb E\|T_{\theta^{\mathrm{CFM}}}-T_{\theta^{\mathrm{KL}}}\|_2^2$
+(conditional squared $W_2$ between the two local Gaussians).
+
+Check (Figure 4, criterion 5): $|\Delta^{\mathrm{proj}}|$ small and `D_endpoint` small ⇒
+the practical CFM step tracks the ideal projection step. $\Delta^{\mathrm{proj}}<0$
+(CFM closer than the KL-loss step) is possible and should be reported signed, not clipped.
+
+## 13.5 Phase 0 pass/fail checklist
+
+Phase 0 promotes a metric to Phase 1 only if:
+
+1. `realization` is predominantly positive and `R_after < R_before` holds broadly;
+2. `E_current_*` sits clearly above `E_SNIS` and `ess_*` is a healthy fraction of
+   $N_{\mathrm{ref}}$ (otherwise raise `n_ref` and re-run);
+3. drift keys scale with `dtheta` (log–log scatter roughly linear);
+4. staleness bins beyond bin0 populate as training proceeds and $E_{\mathrm{stale}}$
+   grows with age;
+5. diagnostic overhead (wall-clock vs a diag-off run) is acceptable for 25 Phase 1 runs.

@@ -55,12 +55,28 @@ guidance_buffer:
   batch_size: 256
 
 # checkpointing
-ckpt_dir: checkpoints/${env_id}_seed${seed}
-ckpt_interval: 10000  # env steps; 0 to disable. every checkpoint is kept (~110MB + replay buffer each)
+ckpt_dir: checkpoints/${env_id}/N${actor.num_train_action_samples}/seed${seed}
+ckpt_interval: 100000  # env steps; 0 to disable. Phase 1 keeps 10 checkpoints per 1M-step run
 resume: null  # "latest", or a path to a step_*.pkl
 
 # WandB (for logging)
 wandb:
   project: FLAG
-  name: ${env_id}
+  name: ${env_id}-N${actor.num_train_action_samples}-seed${seed}
   mode: offline
+
+# diagnostics (plan.md Part II–V + phase1_plan.md §2); off by default
+diag:
+  enabled: false
+  light_every: 10          # env steps between light logs (deliberate deviation from
+                           # plan's "every actor update" — cost control; Phase 0 measured
+                           # this density as sufficient)
+  drift_probe_batch: 128
+  probe_batch: 128         # phase-0 only (heavy_probe); probe_interval=0 disables
+  n_ref: 128               # used by heavy_probe and the shadow reference target
+  probe_interval: 0        # env steps; 0 = off (phase-1 default, phase1_plan §5.1)
+  staleness_interval: 0    # env steps; 0 = off (phase-1 drops age bins, §2.3)
+  staleness_per_bin: 32
+  shadow_interval: 100000  # phase1_plan §2.5
+  shadow_batch: 128
+  shadow_seeds: [0, 1, 2]  # heavy KL/BPTT shadow only on these seeds (§1)
